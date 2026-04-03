@@ -158,3 +158,27 @@ The `/dnsmasq/export_now` endpoint is a special case:
 - it bypasses the file diff check
 - it always writes the current rendered state to the target file
 - it always issues `SIGHUP`
+
+# LXC registration helper
+There is also a helper binary named `lxc_dns_register` for refreshing ephemeral DNS entries from LXC.
+
+Example:
+```
+cargo run --bin lxc_dns_register -- \
+  --lxc-path /path/to/lxc \
+  --suffix titan \
+  --mask 192.168.0.0/24 \
+  --agent 192.168.33.22:8000 \
+  --user admin:password
+```
+
+What it does:
+- runs `lxc ls --format json`
+- keeps only instances whose status is `Running`
+- extracts IP addresses from the LXC state payload
+- keeps only IPs inside the provided CIDR mask
+- registers `<instance-name>.<suffix>` to each matching IP through `POST /dnsmasq/add_host`
+- always uses `replace=false`
+- always uses `ttl=180` seconds (3 minutes)
+
+The `--agent` value accepts `host:port` or `http://host:port`.
