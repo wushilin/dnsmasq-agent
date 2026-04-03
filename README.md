@@ -21,7 +21,6 @@ bind=0.0.0.0
 basic_auth=admin:password
 dnsmasq_pid_file=/run/dnsmasq/dnsmasq.pid
 db_file=./hosts.sqlite
-tmp_dir=./tmp
 ```
 
 # what it does
@@ -151,7 +150,7 @@ This is not perfectly atomic with file export, but it is acceptable. In a race, 
 
 The write out process should write the entries in a deterministic way. e.g. sort IP first, then within the IP, sort by hosts.
 
-And we write to a separate file in tmp directory first, then compare if the written file is actually the same as existing file. The comparison is byte-by-byte on the deterministically rendered output. If they are identical, we do not replace it to avoid spamming the server with SIGHUP. We only issue sighup if a replace is really happened.
+And we write the rendered content to `<target>.tmp` first, then compare that temporary file against the existing target file. If they are identical, we remove the temp file and skip rewriting the target to avoid spamming the server with `SIGHUP`. If they differ, we overwrite the target file directly, close it, remove the temp file, and then issue `SIGHUP`.
 
 The `/dnsmasq/export_now` endpoint is a special case:
 - it bypasses the generation check

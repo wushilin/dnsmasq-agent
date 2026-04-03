@@ -49,7 +49,6 @@ struct Store {
 #[derive(Clone, Debug)]
 struct Config {
     target: PathBuf,
-    tmp_dir: PathBuf,
     flush_interval_ms: u64,
     bind: String,
     port: u16,
@@ -165,7 +164,6 @@ async fn main() -> Result<()> {
     info!(
         config = %config_path.display(),
         target = %config.target.display(),
-        tmp_dir = %config.tmp_dir.display(),
         db_file = %config.db_file.display(),
         bind = %config.bind,
         port = config.port,
@@ -416,8 +414,7 @@ async fn flush_once(state: &AppState) -> Result<()> {
     );
 
     let rendered = render_hosts(&snapshot.hosts);
-    let replace_happened =
-        write_hosts_file_if_changed(&state.config.target, &state.config.tmp_dir, &rendered).await?;
+    let replace_happened = write_hosts_file_if_changed(&state.config.target, &rendered).await?;
     if replace_happened {
         try_send_hup_signal(&state.config.dnsmasq_pid_file).await;
         let mut store = state.store.lock().await;
@@ -459,7 +456,7 @@ async fn force_export_now(state: &AppState) -> Result<()> {
     );
 
     let rendered = render_hosts(&snapshot.hosts);
-    write_hosts_file_force(&state.config.target, &state.config.tmp_dir, &rendered).await?;
+    write_hosts_file_force(&state.config.target, &rendered).await?;
     try_send_hup_signal(&state.config.dnsmasq_pid_file).await;
     {
         let mut store = state.store.lock().await;
@@ -504,7 +501,6 @@ fn load_config(path: &Path) -> Result<Config> {
 
     Ok(Config {
         target: PathBuf::from(required_config(&values, "target")?),
-        tmp_dir: PathBuf::from(required_config(&values, "tmp_dir")?),
         flush_interval_ms: required_config(&values, "flush_interval_ms")?
             .parse()
             .context("invalid flush_interval_ms")?,
@@ -740,11 +736,7 @@ fn format_registered_time(epoch_secs: i64) -> String {
     }
 }
 
-async fn write_hosts_file_if_changed(
-    target: &Path,
-    tmp_dir: &Path,
-    rendered: &str,
-) -> Result<bool> {
+async fn write_hosts_file_if_changed(target: &Path, rendered: &str) -> Result<bool> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).await.with_context(|| {
             format!(
@@ -753,18 +745,14 @@ async fn write_hosts_file_if_changed(
             )
         })?;
     }
-    fs::create_dir_all(tmp_dir)
-        .await
-        .with_context(|| format!("failed to create tmp_dir {}", tmp_dir.display()))?;
-
-    let file_name = target
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("target file name is not valid utf-8"))?;
-    let tmp_path = tmp_dir.join(format!("{file_name}.tmp"));
+    let tmp_path = build_compare_tmp_path(target)?;
     fs::write(&tmp_path, rendered)
         .await
         .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
+
+    let temp_bytes = fs::read(&tmp_path)
+        .await
+        .with_context(|| format!("failed to read temp file {}", tmp_path.display()))?;
 
     let existing = match fs::read(target).await {
         Ok(bytes) => Some(bytes),
@@ -774,7 +762,7 @@ async fn write_hosts_file_if_changed(
         }
     };
 
-    if existing.as_deref() == Some(rendered.as_bytes()) {
+    if existing.as_deref() == Some(temp_bytes.as_slice()) {
         fs::remove_file(&tmp_path).await.with_context(|| {
             format!(
                 "failed to remove unchanged temp file {}",
@@ -784,13 +772,16 @@ async fn write_hosts_file_if_changed(
         return Ok(false);
     }
 
-    fs::rename(&tmp_path, target)
+    fs::write(target, &temp_bytes)
         .await
-        .with_context(|| format!("failed to replace {}", target.display()))?;
+        .with_context(|| format!("failed to write {}", target.display()))?;
+    fs::remove_file(&tmp_path)
+        .await
+        .with_context(|| format!("failed to remove temp file {}", tmp_path.display()))?;
     Ok(true)
 }
 
-async fn write_hosts_file_force(target: &Path, tmp_dir: &Path, rendered: &str) -> Result<()> {
+async fn write_hosts_file_force(target: &Path, rendered: &str) -> Result<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).await.with_context(|| {
             format!(
@@ -799,22 +790,33 @@ async fn write_hosts_file_force(target: &Path, tmp_dir: &Path, rendered: &str) -
             )
         })?;
     }
-    fs::create_dir_all(tmp_dir)
+    let tmp_path = build_compare_tmp_path(target)?;
+    fs::write(&tmp_path, rendered)
         .await
-        .with_context(|| format!("failed to create tmp_dir {}", tmp_dir.display()))?;
+        .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
+    let temp_bytes = fs::read(&tmp_path)
+        .await
+        .with_context(|| format!("failed to read temp file {}", tmp_path.display()))?;
+    fs::write(target, &temp_bytes)
+        .await
+        .with_context(|| format!("failed to write {}", target.display()))?;
+    fs::remove_file(&tmp_path)
+        .await
+        .with_context(|| format!("failed to remove temp file {}", tmp_path.display()))?;
+    Ok(())
+}
 
+fn build_compare_tmp_path(target: &Path) -> Result<PathBuf> {
     let file_name = target
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| anyhow!("target file name is not valid utf-8"))?;
-    let tmp_path = tmp_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, rendered)
-        .await
-        .with_context(|| format!("failed to write temp file {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, target)
-        .await
-        .with_context(|| format!("failed to replace {}", target.display()))?;
-    Ok(())
+    let temp_name = format!("{file_name}.tmp");
+
+    Ok(match target.parent() {
+        Some(parent) => parent.join(temp_name),
+        None => PathBuf::from(temp_name),
+    })
 }
 
 async fn send_hup_signal(pid_file: &Path) -> Result<()> {
