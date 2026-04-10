@@ -27,6 +27,7 @@ struct Args {
     mask: Cidr,
     agent: AgentTarget,
     user: Option<BasicAuth>,
+    replace_ip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ struct AddHostRequest<'a> {
     ip: IpAddr,
     host: &'a str,
     replace: bool,
+    replace_ip: bool,
     ttl: u64,
 }
 
@@ -104,7 +106,7 @@ async fn main() -> Result<()> {
         let host = format_host(name, &args.suffix);
         for ip in ips {
             attempted += 1;
-            register_host(&args.agent, args.user.as_ref(), ip, &host).await?;
+            register_host(&args.agent, args.user.as_ref(), ip, &host, args.replace_ip).await?;
             registered += 1;
             info!(instance = name, %ip, host = %host, "registered instance ip");
         }
@@ -114,6 +116,7 @@ async fn main() -> Result<()> {
         attempted,
         registered,
         ttl_seconds = TTL_SECONDS,
+        replace_ip = args.replace_ip,
         "registration run completed"
     );
     Ok(())
@@ -126,13 +129,16 @@ impl Args {
         let mut mask = None;
         let mut agent = None;
         let mut user = None;
+        let mut replace_ip = true;
 
         let mut args = env::args().skip(1);
         while let Some(flag) = args.next() {
             let value = match flag.as_str() {
-                "--lxc-path" | "--suffix" | "--mask" | "--agent" | "--user" => args
-                    .next()
-                    .ok_or_else(|| anyhow!("missing value for {flag}"))?,
+                "--lxc-path" | "--suffix" | "--mask" | "--agent" | "--user" => Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for {flag}"))?,
+                ),
+                "--no-replace-ip" => None,
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -141,11 +147,12 @@ impl Args {
             };
 
             match flag.as_str() {
-                "--lxc-path" => lxc_path = Some(PathBuf::from(value)),
-                "--suffix" => suffix = Some(normalize_suffix(&value)?),
-                "--mask" => mask = Some(Cidr::from_str(&value)?),
-                "--agent" => agent = Some(AgentTarget::parse(&value)?),
-                "--user" => user = Some(parse_basic_auth(&value)?),
+                "--lxc-path" => lxc_path = Some(PathBuf::from(value.as_deref().unwrap())),
+                "--suffix" => suffix = Some(normalize_suffix(value.as_deref().unwrap())?),
+                "--mask" => mask = Some(Cidr::from_str(value.as_deref().unwrap())?),
+                "--agent" => agent = Some(AgentTarget::parse(value.as_deref().unwrap())?),
+                "--user" => user = Some(parse_basic_auth(value.as_deref().unwrap())?),
+                "--no-replace-ip" => replace_ip = false,
                 _ => unreachable!(),
             }
         }
@@ -156,6 +163,7 @@ impl Args {
             mask: mask.ok_or_else(|| anyhow!("missing required --mask"))?,
             agent: agent.ok_or_else(|| anyhow!("missing required --agent"))?,
             user,
+            replace_ip,
         })
     }
 }
@@ -251,7 +259,7 @@ fn init_logging() {
 
 fn print_usage() {
     println!(
-        "Usage: lxc_dns_register --lxc-path /path/to/lxc --suffix titan --mask 192.168.0.0/24 --agent 192.168.33.22:8000 [--user username:password]"
+        "Usage: lxc_dns_register --lxc-path /path/to/lxc --suffix titan --mask 192.168.0.0/24 --agent 192.168.33.22:8000 [--user username:password] [--no-replace-ip]"
     );
 }
 
@@ -329,11 +337,13 @@ async fn register_host(
     user: Option<&BasicAuth>,
     ip: IpAddr,
     host: &str,
+    replace_ip: bool,
 ) -> Result<()> {
     let payload = AddHostRequest {
         ip,
         host,
         replace: false,
+        replace_ip,
         ttl: TTL_SECONDS,
     };
     let body = serde_json::to_vec(&payload).context("failed to encode add_host request")?;

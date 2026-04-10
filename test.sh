@@ -10,6 +10,8 @@ curl -sS -u admin:password -H 'Content-Type: application/json' -X POST http://12
 
 curl -sS -u admin:password -H 'Content-Type: application/json' -X POST http://127.0.0.1:8000/dnsmasq/add_host --data-binary '{"ip":"10.2.2.2","host":"only-this.com","replace":true}'
 
+curl -sS -u admin:password -H 'Content-Type: application/json' -X POST http://127.0.0.1:8000/dnsmasq/add_host --data-binary '{"ip":"10.2.2.3","host":"only-ip.com","replace":false,"replace_ip":true}'
+
 curl -sS -u admin:password -X GET http://127.0.0.1:8000/dnsmasq/all
 
 curl -sS -u admin:password -X POST http://127.0.0.1:8000/dnsmasq/export_now

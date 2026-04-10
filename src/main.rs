@@ -73,7 +73,10 @@ struct HostEntry {
 struct AddHostRequest {
     ip: IpAddr,
     host: String,
+    #[serde(default)]
     replace: bool,
+    #[serde(default)]
+    replace_ip: bool,
     #[serde(default, alias = "ttl_seconds")]
     ttl: Option<u64>,
 }
@@ -253,6 +256,13 @@ async fn add_host(
         )
         .map_err(|error| internal_api_error(error.into()))?;
     }
+    if payload.replace_ip {
+        tx.execute(
+            "DELETE FROM hosts WHERE host = ?1",
+            params![host.clone()],
+        )
+        .map_err(|error| internal_api_error(error.into()))?;
+    }
     tx.execute(
         "INSERT INTO hosts (ip, host, ttl_seconds, registered_at_epoch_secs)
          VALUES (?1, ?2, ?3, ?4)
@@ -277,6 +287,7 @@ async fn add_host(
         ip = %payload.ip,
         host = %host,
         replace = payload.replace,
+        replace_ip = payload.replace_ip,
         ttl_seconds,
         "api add_host"
     );
@@ -1225,7 +1236,7 @@ fn render_ui_html(csrf_token: &str) -> String {
     <section class="grid">
       <div class="card panel span-5">
         <h2>Add Or Replace Host</h2>
-        <p class="sub">Use the same semantics as <code>POST /dnsmasq/add_host</code>. Re-posting the same host refreshes TTL and registration time.</p>
+        <p class="sub">Use the same semantics as <code>POST /dnsmasq/add_host</code>. Re-posting the same host refreshes TTL and registration time. <code>replace</code> makes the host the only name under that IP, while <code>replace_ip</code> makes the IP the only address for that host.</p>
         <form id="add-form">
           <div class="form-grid">
             <div class="field">
@@ -1243,6 +1254,10 @@ fn render_ui_html(csrf_token: &str) -> String {
             <div class="field check">
               <input id="replace" name="replace" type="checkbox">
               <label for="replace">Replace all hosts under this IP</label>
+            </div>
+            <div class="field check">
+              <input id="replace-ip" name="replace-ip" type="checkbox">
+              <label for="replace-ip">Replace this host across all IPs</label>
             </div>
           </div>
           <div class="actions">
@@ -1393,7 +1408,8 @@ fn render_ui_html(csrf_token: &str) -> String {
         const payload = {{
           ip: document.getElementById('ip').value.trim(),
           host: document.getElementById('host').value.trim(),
-          replace: document.getElementById('replace').checked
+          replace: document.getElementById('replace').checked,
+          replace_ip: document.getElementById('replace-ip').checked
         }};
         const ttlRaw = document.getElementById('ttl').value.trim();
         if (ttlRaw !== '') {{

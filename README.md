@@ -34,6 +34,17 @@ POST /dnsmasq/add_host
 It bind 10.2.2.2 to test.com. If there is already a binding to 10.2.2.2, it added to the binding list (when replace is false)
 if replace = true, all existing host name under 10.2.2.2 is removed, only this `test.com` is retained.
 
+Client can also optionally request that the hostname only exists on one IP:
+```
+POST /dnsmasq/add_host
+{"ip": "10.2.2.2", "host":"test.com", "replace":false, "replace_ip":true}
+```
+If `replace_ip = true`, all existing rows for `test.com` are removed from other IPs before the new row is inserted. This makes `10.2.2.2` the only IP for `test.com` in this agent's registry.
+
+Both flags can be used together:
+- `replace=true` means this host becomes the only hostname under the target IP
+- `replace_ip=true` means this IP becomes the only address for the target host
+
 This api essentially serviced as add, replace feature
 
 Client can also optionally specify a TTL in seconds:
@@ -102,6 +113,10 @@ The UI reuses the same APIs described above and uses AJAX for operations such as
 - delete host
 - delete IP
 - force export now
+
+The add form exposes both replacement modes:
+- `replace`: replace all hosts under the submitted IP
+- `replace_ip`: replace the submitted host across all IPs
 
 The UI should include CSRF protection for mutating requests. A CSRF token is issued with the UI page and sent back on browser-triggered write operations.
 
@@ -178,6 +193,8 @@ What it does:
 - keeps only IPs inside the provided CIDR mask
 - registers `<instance-name>.<suffix>` to each matching IP through `POST /dnsmasq/add_host`
 - always uses `replace=false`
+- uses `replace_ip=true` by default so each hostname points to only one IP
+- `--no-replace-ip` disables that behavior and allows the same hostname to remain on multiple IPs
 - always uses `ttl=180` seconds (3 minutes)
 
 The `--agent` value accepts `host:port` or `http://host:port`.
