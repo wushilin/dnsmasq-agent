@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    env,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     str::FromStr,
@@ -8,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::{
@@ -19,15 +19,36 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 const TTL_SECONDS: u64 = 180;
-const REPLACE_MODE_VALUES: &str = "both, host, ip, none";
 
-#[derive(Debug)]
+#[derive(Debug, Parser)]
+#[command(
+    name = "lxc_dns_register",
+    about = "Register running LXC instance IPs with dnsmasq-agent",
+    version
+)]
 struct Args {
+    /// Path to the lxc executable.
+    #[arg(long)]
     lxc_path: PathBuf,
+
+    /// DNS suffix appended to each LXC instance name.
+    #[arg(long, value_parser = normalize_suffix)]
     suffix: String,
+
+    /// CIDR range used to select instance IPs, for example 192.168.0.0/24.
+    #[arg(long)]
     mask: Cidr,
+
+    /// dnsmasq-agent endpoint as host:port or http://host:port[/base-path].
+    #[arg(long, value_parser = AgentTarget::parse)]
     agent: AgentTarget,
+
+    /// Optional basic auth credentials as username:password.
+    #[arg(long, value_parser = parse_basic_auth)]
     user: Option<BasicAuth>,
+
+    /// Replacement behavior sent to POST /dnsmasq/add_host.
+    #[arg(long, value_enum, default_value = "both")]
     replace_mode: ReplaceMode,
 }
 
@@ -58,33 +79,26 @@ struct AddHostRequest<'a> {
     ttl: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum ReplaceMode {
+    /// Replace other hosts under this IP and other IPs under this host.
     Both,
+
+    /// Replace other hosts under this IP, but allow this host on multiple IPs.
     Host,
+
+    /// Replace other IPs under this host, but allow this IP to keep other hosts.
     Ip,
+
+    /// Add this IP/host pair alongside existing mappings.
     None,
-}
-
-impl FromStr for ReplaceMode {
-    type Err = anyhow::Error;
-
-    fn from_str(raw: &str) -> Result<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "both" => Ok(Self::Both),
-            "host" => Ok(Self::Host),
-            "ip" => Ok(Self::Ip),
-            "none" => Ok(Self::None),
-            _ => bail!("invalid replace mode `{raw}`; expected one of: {REPLACE_MODE_VALUES}"),
-        }
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
-    let args = Args::parse()?;
+    let args = Args::parse();
 
     let output = Command::new(&args.lxc_path)
         .args(["ls", "--format", "json"])
@@ -150,55 +164,6 @@ async fn main() -> Result<()> {
         "registration run completed"
     );
     Ok(())
-}
-
-impl Args {
-    fn parse() -> Result<Self> {
-        let mut lxc_path = None;
-        let mut suffix = None;
-        let mut mask = None;
-        let mut agent = None;
-        let mut user = None;
-        let mut replace_mode = ReplaceMode::Both;
-
-        let mut args = env::args().skip(1);
-        while let Some(flag) = args.next() {
-            let value = match flag.as_str() {
-                "--lxc-path" | "--suffix" | "--mask" | "--agent" | "--user" | "--replace-mode" => {
-                    Some(
-                        args.next()
-                            .ok_or_else(|| anyhow!("missing value for {flag}"))?,
-                    )
-                }
-                "--help" | "-h" => {
-                    print_usage();
-                    std::process::exit(0);
-                }
-                _ => bail!("unknown argument `{flag}`"),
-            };
-
-            match flag.as_str() {
-                "--lxc-path" => lxc_path = Some(PathBuf::from(value.as_deref().unwrap())),
-                "--suffix" => suffix = Some(normalize_suffix(value.as_deref().unwrap())?),
-                "--mask" => mask = Some(Cidr::from_str(value.as_deref().unwrap())?),
-                "--agent" => agent = Some(AgentTarget::parse(value.as_deref().unwrap())?),
-                "--user" => user = Some(parse_basic_auth(value.as_deref().unwrap())?),
-                "--replace-mode" => {
-                    replace_mode = ReplaceMode::from_str(value.as_deref().unwrap())?
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        Ok(Self {
-            lxc_path: lxc_path.ok_or_else(|| anyhow!("missing required --lxc-path"))?,
-            suffix: suffix.ok_or_else(|| anyhow!("missing required --suffix"))?,
-            mask: mask.ok_or_else(|| anyhow!("missing required --mask"))?,
-            agent: agent.ok_or_else(|| anyhow!("missing required --agent"))?,
-            user,
-            replace_mode,
-        })
-    }
 }
 
 impl AgentTarget {
@@ -288,12 +253,6 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lxc_dns_register=info,info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-fn print_usage() {
-    println!(
-        "Usage: lxc_dns_register --lxc-path /path/to/lxc --suffix titan --mask 192.168.0.0/24 --agent 192.168.33.22:8000 [--user username:password] [--replace-mode both|host|ip|none]"
-    );
 }
 
 fn parse_basic_auth(raw: &str) -> Result<BasicAuth> {
@@ -431,6 +390,7 @@ async fn register_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn cidr_contains_ipv4() {
@@ -463,5 +423,43 @@ mod tests {
     #[test]
     fn formats_host_from_name_and_suffix() {
         assert_eq!(format_host("Web-1", "titan"), "web-1.titan");
+    }
+
+    #[test]
+    fn clap_defaults_replace_mode_to_both() {
+        let args = Args::try_parse_from([
+            "lxc_dns_register",
+            "--lxc-path",
+            "/usr/bin/lxc",
+            "--suffix",
+            "titan",
+            "--mask",
+            "192.168.0.0/24",
+            "--agent",
+            "127.0.0.1:8000",
+        ])
+        .unwrap();
+
+        assert_eq!(args.replace_mode, ReplaceMode::Both);
+    }
+
+    #[test]
+    fn clap_parses_replace_mode() {
+        let args = Args::try_parse_from([
+            "lxc_dns_register",
+            "--lxc-path",
+            "/usr/bin/lxc",
+            "--suffix",
+            "titan",
+            "--mask",
+            "192.168.0.0/24",
+            "--agent",
+            "127.0.0.1:8000",
+            "--replace-mode",
+            "ip",
+        ])
+        .unwrap();
+
+        assert_eq!(args.replace_mode, ReplaceMode::Ip);
     }
 }
