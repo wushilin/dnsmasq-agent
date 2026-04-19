@@ -74,11 +74,54 @@ struct AddHostRequest {
     ip: IpAddr,
     host: String,
     #[serde(default)]
-    replace: bool,
+    replace_mode: Option<ReplaceMode>,
     #[serde(default)]
-    replace_ip: bool,
+    replace: Option<bool>,
+    #[serde(default)]
+    replace_ip: Option<bool>,
     #[serde(default, alias = "ttl_seconds")]
     ttl: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReplaceMode {
+    Both,
+    Host,
+    Ip,
+    None,
+}
+
+impl ReplaceMode {
+    fn should_replace_hosts(self) -> bool {
+        matches!(self, Self::Both | Self::Host)
+    }
+
+    fn should_replace_ips(self) -> bool {
+        matches!(self, Self::Both | Self::Ip)
+    }
+}
+
+impl AddHostRequest {
+    fn replacement_mode(&self) -> ReplaceMode {
+        if let Some(replace_mode) = self.replace_mode {
+            return replace_mode;
+        }
+
+        if self.replace.is_some() || self.replace_ip.is_some() {
+            return match (
+                self.replace.unwrap_or(false),
+                self.replace_ip.unwrap_or(false),
+            ) {
+                (true, true) => ReplaceMode::Both,
+                (true, false) => ReplaceMode::Host,
+                (false, true) => ReplaceMode::Ip,
+                (false, false) => ReplaceMode::None,
+            };
+        }
+
+        ReplaceMode::Both
+    }
 }
 
 #[derive(Serialize)]
@@ -238,6 +281,7 @@ async fn add_host(
     ensure_authorized(&state.config, &headers)?;
     ensure_csrf(&headers)?;
     let host = normalize_host_for_api(&payload.host)?;
+    let replace_mode = payload.replacement_mode();
     let ttl_seconds = payload.ttl.unwrap_or(0);
     let now = now_epoch_secs();
 
@@ -249,19 +293,16 @@ async fn add_host(
     let tx = conn
         .transaction()
         .map_err(|error| internal_api_error(error.into()))?;
-    if payload.replace {
+    if replace_mode.should_replace_hosts() {
         tx.execute(
             "DELETE FROM hosts WHERE ip = ?1",
             params![payload.ip.to_string()],
         )
         .map_err(|error| internal_api_error(error.into()))?;
     }
-    if payload.replace_ip {
-        tx.execute(
-            "DELETE FROM hosts WHERE host = ?1",
-            params![host.clone()],
-        )
-        .map_err(|error| internal_api_error(error.into()))?;
+    if replace_mode.should_replace_ips() {
+        tx.execute("DELETE FROM hosts WHERE host = ?1", params![host.clone()])
+            .map_err(|error| internal_api_error(error.into()))?;
     }
     tx.execute(
         "INSERT INTO hosts (ip, host, ttl_seconds, registered_at_epoch_secs)
@@ -286,8 +327,7 @@ async fn add_host(
     info!(
         ip = %payload.ip,
         host = %host,
-        replace = payload.replace,
-        replace_ip = payload.replace_ip,
+        ?replace_mode,
         ttl_seconds,
         "api add_host"
     );
@@ -1053,7 +1093,8 @@ fn render_ui_html(csrf_token: &str) -> String {
       font-weight: 700;
     }}
     input[type="text"],
-    input[type="number"] {{
+    input[type="number"],
+    select {{
       width: 100%;
       border: 1px solid rgba(31,42,42,0.12);
       background: var(--panel-strong);
@@ -1064,7 +1105,8 @@ fn render_ui_html(csrf_token: &str) -> String {
       font: inherit;
       transition: border-color 120ms ease, transform 120ms ease;
     }}
-    input:focus {{
+    input:focus,
+    select:focus {{
       border-color: rgba(15,118,110,0.55);
       transform: translateY(-1px);
     }}
@@ -1236,7 +1278,7 @@ fn render_ui_html(csrf_token: &str) -> String {
     <section class="grid">
       <div class="card panel span-5">
         <h2>Add Or Replace Host</h2>
-        <p class="sub">Use the same semantics as <code>POST /dnsmasq/add_host</code>. Re-posting the same host refreshes TTL and registration time. <code>replace</code> makes the host the only name under that IP, while <code>replace_ip</code> makes the IP the only address for that host.</p>
+        <p class="sub">Use the same semantics as <code>POST /dnsmasq/add_host</code>. Re-posting the same host refreshes TTL and registration time. <code>replace_mode</code> defaults to <code>both</code>, making this IP map only to this host and this host map only to this IP.</p>
         <form id="add-form">
           <div class="form-grid">
             <div class="field">
@@ -1251,13 +1293,14 @@ fn render_ui_html(csrf_token: &str) -> String {
               <label for="ttl">TTL Seconds</label>
               <input id="ttl" name="ttl" type="number" min="0" placeholder="0 means forever">
             </div>
-            <div class="field check">
-              <input id="replace" name="replace" type="checkbox">
-              <label for="replace">Replace all hosts under this IP</label>
-            </div>
-            <div class="field check">
-              <input id="replace-ip" name="replace-ip" type="checkbox">
-              <label for="replace-ip">Replace this host across all IPs</label>
+            <div class="field">
+              <label for="replace-mode">Replace Mode</label>
+              <select id="replace-mode" name="replace-mode">
+                <option value="both" selected>Both: IP only has this host, host only has this IP</option>
+                <option value="host">Host: IP only has this host</option>
+                <option value="ip">IP: host only has this IP</option>
+                <option value="none">None: add alongside existing entries</option>
+              </select>
             </div>
           </div>
           <div class="actions">
@@ -1408,8 +1451,7 @@ fn render_ui_html(csrf_token: &str) -> String {
         const payload = {{
           ip: document.getElementById('ip').value.trim(),
           host: document.getElementById('host').value.trim(),
-          replace: document.getElementById('replace').checked,
-          replace_ip: document.getElementById('replace-ip').checked
+          replace_mode: document.getElementById('replace-mode').value
         }};
         const ttlRaw = document.getElementById('ttl').value.trim();
         if (ttlRaw !== '') {{
@@ -1502,4 +1544,58 @@ fn maybe_log_no_pending(store: &mut Store, db_generation: i64, file_generation: 
 
 fn reset_no_pending_log_suppression(store: &mut Store) {
     store.last_no_pending_log_at = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with_modes(
+        replace_mode: Option<ReplaceMode>,
+        replace: Option<bool>,
+        replace_ip: Option<bool>,
+    ) -> AddHostRequest {
+        AddHostRequest {
+            ip: "10.0.0.1".parse().unwrap(),
+            host: "example.test".to_string(),
+            replace_mode,
+            replace,
+            replace_ip,
+            ttl: None,
+        }
+    }
+
+    #[test]
+    fn replacement_mode_defaults_to_both() {
+        let request = request_with_modes(None, None, None);
+
+        assert_eq!(request.replacement_mode(), ReplaceMode::Both);
+    }
+
+    #[test]
+    fn replacement_mode_prefers_explicit_mode_over_legacy_flags() {
+        let request = request_with_modes(Some(ReplaceMode::Ip), Some(true), Some(false));
+
+        assert_eq!(request.replacement_mode(), ReplaceMode::Ip);
+    }
+
+    #[test]
+    fn replacement_mode_maps_legacy_flags() {
+        assert_eq!(
+            request_with_modes(None, Some(true), Some(true)).replacement_mode(),
+            ReplaceMode::Both
+        );
+        assert_eq!(
+            request_with_modes(None, Some(true), Some(false)).replacement_mode(),
+            ReplaceMode::Host
+        );
+        assert_eq!(
+            request_with_modes(None, Some(false), Some(true)).replacement_mode(),
+            ReplaceMode::Ip
+        );
+        assert_eq!(
+            request_with_modes(None, Some(false), Some(false)).replacement_mode(),
+            ReplaceMode::None
+        );
+    }
 }

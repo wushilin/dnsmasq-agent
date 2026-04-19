@@ -29,34 +29,42 @@ Since hosts file primary key is the IP, and there can be one or more hosts under
 ## Adding a host under specific IP
 ```
 POST /dnsmasq/add_host
-{"ip": "10.2.2.2", "host":"test.com", "replace":false}
+{"ip": "10.2.2.2", "host":"test.com", "replace_mode":"both"}
 ```
-It bind 10.2.2.2 to test.com. If there is already a binding to 10.2.2.2, it added to the binding list (when replace is false)
-if replace = true, all existing host name under 10.2.2.2 is removed, only this `test.com` is retained.
+It binds `10.2.2.2` to `test.com`. By default, `replace_mode` is `both`, so `10.2.2.2` only has this host and `test.com` only has this IP.
 
-Client can also optionally request that the hostname only exists on one IP:
+Replacement modes:
+- `both`: replace other hosts under this IP and replace other IPs under this host
+- `host`: replace other hosts under this IP, but allow this host to exist under multiple IPs
+- `ip`: replace other IPs under this host, but allow this IP to have multiple hosts
+- `none`: add this host/IP pair alongside existing entries
+
+Example: make the IP point only to this host, while allowing the host to keep other IPs:
 ```
 POST /dnsmasq/add_host
-{"ip": "10.2.2.2", "host":"test.com", "replace":false, "replace_ip":true}
+{"ip": "10.2.2.2", "host":"test.com", "replace_mode":"host"}
 ```
-If `replace_ip = true`, all existing rows for `test.com` are removed from other IPs before the new row is inserted. This makes `10.2.2.2` the only IP for `test.com` in this agent's registry.
 
-Both flags can be used together:
-- `replace=true` means this host becomes the only hostname under the target IP
-- `replace_ip=true` means this IP becomes the only address for the target host
+Example: make the host point only to this IP, while allowing the IP to keep other hosts:
+```
+POST /dnsmasq/add_host
+{"ip": "10.2.2.2", "host":"test.com", "replace_mode":"ip"}
+```
+
+Legacy clients can still send `replace` and `replace_ip`; `replace_mode` is preferred for new clients.
 
 This api essentially serviced as add, replace feature
 
 Client can also optionally specify a TTL in seconds:
 ```
 POST /dnsmasq/add_host
-{"ip": "10.2.2.2", "host":"test.com", "replace":false, "ttl":1800}
+{"ip": "10.2.2.2", "host":"test.com", "replace_mode":"none", "ttl":1800}
 ```
 
 or
 ```
 POST /dnsmasq/add_host
-{"ip": "10.2.2.2", "host":"test.com", "replace":false, "ttl_seconds":1800}
+{"ip": "10.2.2.2", "host":"test.com", "replace_mode":"none", "ttl_seconds":1800}
 ```
 
 When a TTL is specified, the hostname is treated as ephemeral and disappears after the TTL expires unless the client refreshes it by calling `add_host` again. This is useful for systems like Docker watchers that continuously publish active entries but may not be able to delete stale ones. If the same `ip` + `host` is added again, the TTL and registration time are refreshed from the new API call.
@@ -114,9 +122,7 @@ The UI reuses the same APIs described above and uses AJAX for operations such as
 - delete IP
 - force export now
 
-The add form exposes both replacement modes:
-- `replace`: replace all hosts under the submitted IP
-- `replace_ip`: replace the submitted host across all IPs
+The add form exposes `replace_mode` with `both`, `host`, `ip`, and `none`.
 
 The UI should include CSRF protection for mutating requests. A CSRF token is issued with the UI page and sent back on browser-triggered write operations.
 
@@ -192,9 +198,10 @@ What it does:
 - extracts IP addresses from the LXC state payload
 - keeps only IPs inside the provided CIDR mask
 - registers `<instance-name>.<suffix>` to each matching IP through `POST /dnsmasq/add_host`
-- always uses `replace=false`
-- uses `replace_ip=true` by default so each hostname points to only one IP
-- `--no-replace-ip` disables that behavior and allows the same hostname to remain on multiple IPs
+- uses `replace_mode=both` by default so each IP maps only to the generated hostname and each generated hostname maps only to that IP
+- `--replace-mode host` keeps each IP exclusive to the generated hostname, but allows the same hostname to remain on multiple IPs
+- `--replace-mode ip` keeps each hostname exclusive to the current IP, but allows the IP to keep other hosts
+- `--replace-mode none` adds entries alongside existing mappings
 - always uses `ttl=180` seconds (3 minutes)
 
 The `--agent` value accepts `host:port` or `http://host:port`.
